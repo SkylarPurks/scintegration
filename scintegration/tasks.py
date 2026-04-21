@@ -9,6 +9,7 @@ References:
 """
 
 import logging
+import inspect
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Any, Optional
@@ -344,16 +345,16 @@ class MetadataLabelPredictionTask:
             'recall': make_scorer(recall_score, average=average_strategy, zero_division=0),
         }
         
-        # Add AUROC for multi-class and binary classification
-        if n_classes == 2:
-            scorers['auroc'] = make_scorer(roc_auc_score, needs_proba=True)
+        # Add AUROC for multi-class and binary classification.
+        # sklearn API changed from needs_proba -> response_method.
+        scorer_sig = inspect.signature(make_scorer)
+        if "response_method" in scorer_sig.parameters:
+            auroc_kwargs = {'response_method': 'predict_proba'}
         else:
-            scorers['auroc'] = make_scorer(
-                roc_auc_score,
-                average='macro',
-                multi_class='ovr',
-                needs_proba=True
-            )
+            auroc_kwargs = {'needs_proba': True}
+        if n_classes != 2:
+            auroc_kwargs.update({'average': 'macro', 'multi_class': 'ovr'})
+        scorers['auroc'] = make_scorer(roc_auc_score, **auroc_kwargs)
         
         # Setup stratified k-fold
         skf = StratifiedKFold(

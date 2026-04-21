@@ -10,7 +10,7 @@ Main Components:
 - ClusteringTaskInput, MetadataLabelPredictionTaskInput: Task input classes
 - calculate_integration_score: Core formula implementation
 - normalize_silhouette: Normalization utility for silhouette scores
-- plot_model_comparison, plot_metric_heatmap: Visualization functions
+- plot_model_comparison, plot_metric_bar_comparison: Visualization functions
 - configure_logging: Easy logging setup for debugging
 - analyze_label_distribution: Check for rare classes before running benchmarks
 
@@ -43,8 +43,8 @@ Example Usage:
     >>> print(f"Leakage Score: {results.scores['scvi'].L:.4f}")
     >>> 
     >>> # Visualize results
-    >>> from scintegration import plot_metric_heatmap
-    >>> plot_metric_heatmap(results, model_names='scvi')
+    >>> from scintegration import plot_model_comparison
+    >>> plot_model_comparison(results)
 
 For more information, see the documentation at https://github.com/SkylarPurks/scintegration
 """
@@ -54,7 +54,13 @@ __author__ = "SkylarPurks"
 
 from .core import calculate_integration_score, compute_B_score, compute_L_score
 from .normalization import normalize_silhouette, normalize_ari
-from .evaluator import IntegrationScoreEvaluator, IntegrationScoreResults, ModelScore
+from .evaluator import (
+    IntegrationScoreEvaluator,
+    IntegrationScoreResults,
+    ModelScore,
+    BaselineComparison,
+    BaselineComparisonResults,
+)
 
 # Import our own task implementations
 from .tasks import (
@@ -71,7 +77,7 @@ from .tasks import (
 # Import visualization functions
 from .visualization import (
     plot_model_comparison,
-    plot_metric_heatmap,
+    plot_metric_bar_comparison,
     plot_metric_summary,
 )
 
@@ -87,6 +93,8 @@ __all__ = [
     'IntegrationScoreEvaluator',
     'IntegrationScoreResults',
     'ModelScore',
+    'BaselineComparison',
+    'BaselineComparisonResults',
     'calculate_integration_score',
     'compute_B_score',
     'compute_L_score',
@@ -101,7 +109,7 @@ __all__ = [
     'MetricType',
     'MetricResult',
     'plot_model_comparison',
-    'plot_metric_heatmap',
+    'plot_metric_bar_comparison',
     'plot_metric_summary',
     'configure_logging',
     'analyze_label_distribution',

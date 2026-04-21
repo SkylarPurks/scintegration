@@ -259,6 +259,130 @@ class IntegrationScoreResults:
         return f"IntegrationScoreResults({len(self.scores)} models, best={self.best_model})"
 
 
+@dataclass
+class BaselineComparison:
+    """
+    Container for integrated-vs-baseline comparison for a single model.
+
+    Attributes
+    ----------
+    model_name : str
+        Name of the embedding model.
+    with_integration : ModelScore
+        Score computed from integrated embedding.
+    without_integration : ModelScore
+        Score computed from non-integrated baseline embedding.
+    delta_integration_score : float
+        Difference in integration score (integrated - baseline).
+    delta_B : float
+        Difference in biology preservation score (integrated - baseline).
+    delta_L : float
+        Difference in batch leakage score (integrated - baseline).
+    baseline_source : str
+        Source of baseline embedding: "provided" or "pca".
+    """
+    model_name: str
+    with_integration: ModelScore
+    without_integration: ModelScore
+    delta_integration_score: float
+    delta_B: float
+    delta_L: float
+    baseline_source: str
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary representation."""
+        return {
+            'model_name': self.model_name,
+            'baseline_source': self.baseline_source,
+            'with_integration_score': self.with_integration.integration_score,
+            'without_integration_score': self.without_integration.integration_score,
+            'with_integration_B': self.with_integration.B,
+            'without_integration_B': self.without_integration.B,
+            'with_integration_L': self.with_integration.L,
+            'without_integration_L': self.without_integration.L,
+            'delta_integration_score': self.delta_integration_score,
+            'delta_B': self.delta_B,
+            'delta_L': self.delta_L,
+        }
+
+
+class BaselineComparisonResults:
+    """
+    Container for integrated-vs-baseline comparisons across multiple models.
+
+    Attributes
+    ----------
+    comparisons : dict
+        Dictionary mapping model names to BaselineComparison objects.
+    model_names : list
+        List of evaluated model names.
+    """
+
+    def __init__(self, comparisons: Dict[str, BaselineComparison]):
+        self.comparisons = comparisons
+        self.model_names = list(comparisons.keys())
+
+    def get_ranked_models(self) -> List[tuple]:
+        """
+        Get models ranked by delta integration score (highest to lowest).
+
+        Returns
+        -------
+        list of tuples
+            List of (model_name, BaselineComparison) tuples sorted by delta score.
+        """
+        return sorted(
+            self.comparisons.items(),
+            key=lambda x: x[1].delta_integration_score,
+            reverse=True
+        )
+
+    @property
+    def best_model(self) -> str:
+        """Get name of model with largest positive delta integration score."""
+        return self.get_ranked_models()[0][0]
+
+    def to_dataframe(self):
+        """Convert comparison results to pandas DataFrame."""
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError(
+                "pandas is required for to_dataframe(). "
+                "Install it with: pip install pandas"
+            )
+
+        rows = [comparison.to_dict() for comparison in self.comparisons.values()]
+        return pd.DataFrame(rows)
+
+    def summary(self) -> str:
+        """Generate text summary for baseline comparisons."""
+        lines = ["=" * 80]
+        lines.append("INTEGRATED VS BASELINE COMPARISON")
+        lines.append("=" * 80)
+
+        for rank, (model_name, comparison) in enumerate(self.get_ranked_models(), 1):
+            lines.append(f"\n#{rank} {model_name.upper()} ({comparison.baseline_source} baseline):")
+            lines.append(
+                f"  IS with/without: {comparison.with_integration.integration_score:+.4f} / "
+                f"{comparison.without_integration.integration_score:+.4f}"
+            )
+            lines.append(f"  ΔIS: {comparison.delta_integration_score:+.4f}")
+            lines.append(f"  ΔB:  {comparison.delta_B:+.4f}")
+            lines.append(f"  ΔL:  {comparison.delta_L:+.4f}")
+
+        lines.append("\n" + "=" * 80)
+        lines.append(
+            f"TOP IMPROVEMENT: {self.best_model.upper()} "
+            f"(ΔIS = {self.comparisons[self.best_model].delta_integration_score:+.4f})"
+        )
+        lines.append("=" * 80)
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return f"BaselineComparisonResults({len(self.comparisons)} models, best={self.best_model})"
+
+
 class IntegrationScoreEvaluator:
     """
     Calculate integration scores from task results.
@@ -658,3 +782,206 @@ class IntegrationScoreEvaluator:
             classification_results_biology=classification_bio,
             classification_results_batch=classification_batch
         )
+
+    @staticmethod
+    def _compute_pca_baseline(
+        raw_features: np.ndarray,
+        n_components: int
+    ) -> np.ndarray:
+        """
+        Compute PCA embedding using SVD without external dependencies.
+
+        Parameters
+        ----------
+        raw_features : np.ndarray
+            Matrix of shape (n_cells, n_features).
+        n_components : int
+            Number of principal components to return.
+
+        Returns
+        -------
+        np.ndarray
+            PCA embedding of shape (n_cells, n_components).
+        """
+        if raw_features.ndim != 2:
+            raise ValueError(
+                f"raw_features must be 2D. Got shape {raw_features.shape}."
+            )
+
+        n_cells, n_features = raw_features.shape
+        max_components = min(n_cells, n_features)
+        if n_components <= 0:
+            raise ValueError("n_components must be > 0.")
+        if n_components > max_components:
+            raise ValueError(
+                f"n_components ({n_components}) exceeds maximum possible ({max_components}) "
+                f"for raw_features shape {raw_features.shape}."
+            )
+
+        centered = raw_features - np.mean(raw_features, axis=0, keepdims=True)
+        u, s, _ = np.linalg.svd(centered, full_matrices=False)
+        return u[:, :n_components] * s[:n_components]
+
+    def evaluate_embeddings_with_baseline(
+        self,
+        embeddings_by_model: Dict[str, Dict[str, np.ndarray]],
+        obs: pd.DataFrame,
+        biology_labels: np.ndarray,
+        batch_labels: np.ndarray,
+        raw_features: Optional[np.ndarray] = None,
+        use_pca_baseline_when_missing: bool = True,
+        pca_n_components: Optional[int] = None,
+        classification_n_folds: Optional[int] = None,
+        classification_min_class_size: Optional[int] = None,
+        clustering_n_neighbors: Optional[int] = None,
+        clustering_resolution: Optional[float] = None
+    ) -> BaselineComparisonResults:
+        """
+        Evaluate integrated embeddings against non-integrated baselines.
+
+        For each model, this computes two integration scores:
+        1) `with_integration` embedding score
+        2) `without_integration` baseline score (provided or PCA fallback)
+
+        The returned deltas are:
+        - ΔIS = IS_with_integration - IS_without_integration
+        - ΔB = B_with_integration - B_without_integration
+        - ΔL = L_with_integration - L_without_integration
+
+        Parameters
+        ----------
+        embeddings_by_model : dict
+            Mapping of model_name -> embedding variants with required key
+            `with_integration` and optional key `without_integration`.
+            Example:
+            {
+                "scvi": {
+                    "with_integration": integrated_embedding,
+                    "without_integration": non_integrated_embedding
+                }
+            }
+        obs : pd.DataFrame
+            AnnData observation metadata.
+        biology_labels : np.ndarray
+            Biological labels (e.g., cell types).
+        batch_labels : np.ndarray
+            Batch labels (e.g., donors).
+        raw_features : np.ndarray, optional
+            Raw feature matrix (n_cells, n_features), used to build PCA baseline
+            when `without_integration` is missing for a model.
+        use_pca_baseline_when_missing : bool, default=True
+            Whether to generate PCA baseline for models missing
+            `without_integration` embedding.
+        pca_n_components : int, optional
+            Number of PCA dimensions for fallback. If None, uses number of columns
+            in that model's `with_integration` embedding.
+
+        Returns
+        -------
+        BaselineComparisonResults
+            Per-model paired comparison with deltas and baseline source.
+
+        Raises
+        ------
+        ValueError
+            If required keys are missing or dimensions are inconsistent.
+        """
+        if not embeddings_by_model:
+            raise ValueError("embeddings_by_model cannot be empty.")
+
+        n_cells_expected = len(obs)
+        if len(biology_labels) != n_cells_expected or len(batch_labels) != n_cells_expected:
+            raise ValueError(
+                "obs, biology_labels, and batch_labels must have matching number of cells. "
+                f"Got len(obs)={len(obs)}, len(biology_labels)={len(biology_labels)}, "
+                f"len(batch_labels)={len(batch_labels)}"
+            )
+
+        comparisons: Dict[str, BaselineComparison] = {}
+
+        for model_name, embeddings in embeddings_by_model.items():
+            if 'with_integration' not in embeddings:
+                raise ValueError(
+                    f"Model '{model_name}' is missing required key 'with_integration'."
+                )
+
+            with_integration_embedding = embeddings['with_integration']
+            if with_integration_embedding.shape[0] != n_cells_expected:
+                raise ValueError(
+                    f"Model '{model_name}' with_integration has {with_integration_embedding.shape[0]} "
+                    f"cells but obs has {n_cells_expected}."
+                )
+
+            without_integration_embedding = embeddings.get('without_integration')
+            baseline_source = 'provided'
+
+            if without_integration_embedding is None:
+                if not use_pca_baseline_when_missing:
+                    raise ValueError(
+                        f"Model '{model_name}' is missing 'without_integration' and "
+                        "PCA fallback is disabled."
+                    )
+                if raw_features is None:
+                    raise ValueError(
+                        f"Model '{model_name}' is missing 'without_integration'. "
+                        "Provide raw_features for PCA fallback or disable fallback and provide baseline embeddings."
+                    )
+                if raw_features.shape[0] != n_cells_expected:
+                    raise ValueError(
+                        f"raw_features has {raw_features.shape[0]} cells but obs has {n_cells_expected}."
+                    )
+
+                n_components = (
+                    pca_n_components
+                    if pca_n_components is not None
+                    else with_integration_embedding.shape[1]
+                )
+                without_integration_embedding = self._compute_pca_baseline(
+                    raw_features=raw_features,
+                    n_components=n_components
+                )
+                baseline_source = 'pca'
+
+            if without_integration_embedding.shape[0] != n_cells_expected:
+                raise ValueError(
+                    f"Model '{model_name}' without_integration has "
+                    f"{without_integration_embedding.shape[0]} cells but obs has {n_cells_expected}."
+                )
+
+            with_result = self.evaluate_embeddings(
+                embeddings=with_integration_embedding,
+                obs=obs,
+                biology_labels=biology_labels,
+                batch_labels=batch_labels,
+                model_name=model_name,
+                classification_n_folds=classification_n_folds,
+                classification_min_class_size=classification_min_class_size,
+                clustering_n_neighbors=clustering_n_neighbors,
+                clustering_resolution=clustering_resolution
+            ).scores[model_name]
+
+            without_result = self.evaluate_embeddings(
+                embeddings=without_integration_embedding,
+                obs=obs,
+                biology_labels=biology_labels,
+                batch_labels=batch_labels,
+                model_name=model_name,
+                classification_n_folds=classification_n_folds,
+                classification_min_class_size=classification_min_class_size,
+                clustering_n_neighbors=clustering_n_neighbors,
+                clustering_resolution=clustering_resolution
+            ).scores[model_name]
+
+            comparisons[model_name] = BaselineComparison(
+                model_name=model_name,
+                with_integration=with_result,
+                without_integration=without_result,
+                delta_integration_score=(
+                    with_result.integration_score - without_result.integration_score
+                ),
+                delta_B=(with_result.B - without_result.B),
+                delta_L=(with_result.L - without_result.L),
+                baseline_source=baseline_source
+            )
+
+        return BaselineComparisonResults(comparisons)
